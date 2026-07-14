@@ -6,3 +6,7 @@
 *.user
 *.suo
 *.log
+
+# 忽略用户个人预设
+CMakeUserPresets.json
+
