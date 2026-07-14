@@ -175,7 +175,8 @@ void PortServerWorker::handleReadyRead(QTcpSocket *socket)
             return;
         }
 
-        const qint64 queuedBytes = socket->write(response);
+        const QByteArray deviceResponse = EchoStreamProcessor::buildProtocolResponse(response);
+        const qint64 queuedBytes = socket->write(deviceResponse);
         if (queuedBytes < 0) {
             ++m_stats.protocolErrors;
             m_stats.lastError = socket->errorString();

@@ -57,17 +57,20 @@ QByteArray readExactly(QTcpSocket &socket, int expectedBytes, int timeoutMs)
 }
 
 /**
- * @brief Sends one request and verifies that the worker echoes it unchanged.
+ * @brief Sends one request and verifies the device-style response.
  */
-bool expectEcho(QTcpSocket &socket, const QByteArray &request, const char *message)
+bool expectProtocolResponse(QTcpSocket &socket,
+                            const QByteArray &request,
+                            const QByteArray &expected,
+                            const char *message)
 {
     if (socket.write(request) != request.size() || !socket.waitForBytesWritten(3000)) {
         qCritical() << message << "write failed:" << socket.errorString();
         return false;
     }
-    const QByteArray response = readExactly(socket, request.size(), 3000);
-    if (response != request) {
-        qCritical() << message << "expected" << request.toHex() << "got" << response.toHex();
+    const QByteArray response = readExactly(socket, expected.size(), 3000);
+    if (response != expected) {
+        qCritical() << message << "expected" << expected.toHex() << "got" << response.toHex();
         return false;
     }
     return true;
@@ -133,7 +136,7 @@ int main(int argc, char *argv[])
             qCritical() << "Client connection failed:" << socket.errorString();
         } else {
             // Verify that a frame split across two TCP writes is reassembled.
-            const QByteArray splitFrame = makeFrame(0x01, QByteArray::fromHex("010203040506"));
+            const QByteArray splitFrame = makeFrame(0x01);
             const QByteArray firstPart = splitFrame.left(4);
             const QByteArray secondPart = splitFrame.mid(4);
             passed &= socket.write(firstPart) == firstPart.size();
@@ -141,16 +144,24 @@ int main(int argc, char *argv[])
             passed &= !socket.waitForReadyRead(100);
             passed &= socket.write(secondPart) == secondPart.size();
             passed &= socket.waitForBytesWritten(3000);
-            const QByteArray splitResponse = readExactly(socket, splitFrame.size(), 3000);
-            if (splitResponse != splitFrame) {
-                qCritical() << "split frame expected" << splitFrame.toHex() << "got" << splitResponse.toHex();
+            const QByteArray splitExpected = EchoStreamProcessor::buildProtocolResponse(splitFrame);
+            const QByteArray splitResponse = readExactly(socket, splitExpected.size(), 3000);
+            if (splitResponse != splitExpected) {
+                qCritical() << "split frame expected" << splitExpected.toHex() << "got" << splitResponse.toHex();
                 passed = false;
             }
 
-            // Verify that two frames and a raw ASCII request are all echoed.
-            const QByteArray stickyFrames = makeFrame(0x02) + makeFrame(0x03, QByteArray("payload"));
-            passed &= expectEcho(socket, stickyFrames, "sticky frames");
-            passed &= expectEcho(socket, QByteArray("ASCII command\r\n"), "raw ASCII");
+            // Verify that two protocol frames are transformed independently and
+            // raw ASCII remains an unchanged response block.
+            const QByteArray firstSticky = makeFrame(0x02);
+            const QByteArray secondSticky = makeFrame(0x03, QByteArray("payload"));
+            passed &= expectProtocolResponse(socket,
+                                             firstSticky + secondSticky,
+                                             EchoStreamProcessor::buildProtocolResponse(firstSticky) +
+                                                 EchoStreamProcessor::buildProtocolResponse(secondSticky),
+                                             "sticky frames");
+            const QByteArray raw = QByteArray("ASCII command\r\n");
+            passed &= expectProtocolResponse(socket, raw, raw, "raw ASCII");
             socket.disconnectFromHost();
             socket.waitForDisconnected(1000);
         }

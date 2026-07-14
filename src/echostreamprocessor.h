@@ -5,16 +5,20 @@
 #include <QVector>
 
 /**
- * @brief Splits a TCP byte stream into echoable protocol frames and raw blocks.
+ * @brief Splits a TCP byte stream into protocol frames and raw blocks.
  *
  * TCP does not preserve application message boundaries. One readyRead signal
  * may contain half a frame, one frame, or several frames. This class keeps the
  * incomplete tail in m_buffer and returns only complete units to the caller.
- * Complete units are returned unchanged, because this server is an echo server.
+ * Complete units are returned unchanged by the splitter; the server layer then
+ * converts A0 81 request frames to the device-style response format.
  */
 class EchoStreamProcessor final
 {
 public:
+    /** Builds the device-style response shown by the client protocol example. */
+    static QByteArray buildProtocolResponse(const QByteArray &request);
+
     /**
      * @brief Describes the complete units extracted during one appendData call.
      *
@@ -57,7 +61,7 @@ private:
     static constexpr int kLengthOffset = 3;
     static constexpr int kHeaderSize = 8;
     static constexpr int kMinimumFrameSize = 9;
-    static constexpr quint32 kMaximumPayloadLength = 1024 * 1024;
+    static constexpr quint32 kMaximumPayloadLength = 4 * 1024 * 1024;
 
     static int findHeader(const QByteArray &data);
     static quint32 payloadLength(const QByteArray &data);

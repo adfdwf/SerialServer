@@ -3,11 +3,11 @@
 #include <QtGlobal>
 
 /**
- * @brief Appends TCP bytes and returns every complete echoable unit.
+ * @brief Appends TCP bytes and returns every complete protocol unit.
  *
  * The parser deliberately preserves the original bytes. It only determines
- * boundaries and records checksum/format errors; the server layer is expected
- * to echo the returned QByteArray values without changing their contents.
+ * boundaries and records checksum/format errors; the server layer decides the
+ * response representation after framing is complete.
  */
 EchoStreamProcessor::Result EchoStreamProcessor::appendData(const QByteArray &data)
 {
@@ -72,6 +72,30 @@ EchoStreamProcessor::Result EchoStreamProcessor::appendData(const QByteArray &da
     }
 
     return result;
+}
+
+QByteArray EchoStreamProcessor::buildProtocolResponse(const QByteArray &request)
+{
+    if (request.size() < 9 || static_cast<quint8>(request.at(0)) != 0xA0 ||
+        static_cast<quint8>(request.at(1)) != 0x81) {
+        return request;
+    }
+
+    QByteArray response;
+    response.append(static_cast<char>(0xA0));
+    response.append(static_cast<char>(0x00));
+    response.append(static_cast<char>(0x64));
+    // Preserve the request command fields 0x81 through the first four bytes;
+    // byte 7 is the device success status 0x10 shown in the reference frame.
+    response.append(request.mid(1, 4));
+    response.append(static_cast<char>(0x10));
+
+    quint8 checksum = 0;
+    for (char byte : response) {
+        checksum = static_cast<quint8>(checksum + static_cast<quint8>(byte));
+    }
+    response.append(static_cast<char>(checksum));
+    return response;
 }
 
 int EchoStreamProcessor::bufferedByteCount() const

@@ -67,6 +67,8 @@ int main(int argc, char *argv[])
 
     const QByteArray firstFrame = makeFrame(0x01);
     const QByteArray secondFrame = makeFrame(0x02, QByteArray::fromHex("0102030405"));
+    const QByteArray deviceResponse = EchoStreamProcessor::buildProtocolResponse(firstFrame);
+    passed &= check(deviceResponse == QByteArray::fromHex("A0 00 64 81 01 00 00 10 96"), "device response format or checksum incorrect");
 
     // A split frame must not be emitted until its second TCP chunk arrives.
     EchoStreamProcessor splitProcessor;
@@ -100,6 +102,15 @@ int main(int argc, char *argv[])
     const auto checksumResult = checksumProcessor.appendData(invalidChecksum);
     passed &= check(checksumResult.responses == QVector<QByteArray>({invalidChecksum}), "invalid frame was not echoed unchanged");
     passed &= check(checksumResult.checksumErrors == 1, "checksum error not counted");
+
+    const QByteArray largePayload(4 * 1024 * 1024, static_cast<char>(0x5A));
+    const QByteArray largeFrame = makeFrame(0x04, largePayload);
+    EchoStreamProcessor largeProcessor;
+    const auto largeResult = largeProcessor.appendData(largeFrame);
+    passed &= check(largeResult.responses == QVector<QByteArray>({largeFrame}), "4 MiB protocol frame not reassembled");
+    passed &= check(EchoStreamProcessor::buildProtocolResponse(largeFrame) ==
+                        QByteArray::fromHex("A0 00 64 81 04 00 40 10 D9"),
+                    "large protocol request did not produce the device response");
 
     if (!passed) {
         return 1;
