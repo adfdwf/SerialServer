@@ -11,6 +11,9 @@
 
 namespace {
 
+/**
+ * @brief Builds a valid protocol frame for the integration test client.
+ */
 QByteArray makeFrame(quint8 command, const QByteArray &payload = {})
 {
     QByteArray frame;
@@ -33,6 +36,12 @@ QByteArray makeFrame(quint8 command, const QByteArray &payload = {})
     return frame;
 }
 
+/**
+ * @brief Reads until a requested number of bytes arrives or the timeout expires.
+ *
+ * The helper mirrors real TCP behavior: one waitForReadyRead call is not
+ * assumed to return a complete application frame.
+ */
 QByteArray readExactly(QTcpSocket &socket, int expectedBytes, int timeoutMs)
 {
     QByteArray received;
@@ -47,6 +56,9 @@ QByteArray readExactly(QTcpSocket &socket, int expectedBytes, int timeoutMs)
     return received;
 }
 
+/**
+ * @brief Sends one request and verifies that the worker echoes it unchanged.
+ */
 bool expectEcho(QTcpSocket &socket, const QByteArray &request, const char *message)
 {
     if (socket.write(request) != request.size() || !socket.waitForBytesWritten(3000)) {
@@ -63,11 +75,16 @@ bool expectEcho(QTcpSocket &socket, const QByteArray &request, const char *messa
 
 } // namespace
 
+/**
+ * @brief Runs the worker in a QThread and exercises its TCP echo behavior.
+ */
 int main(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
     qRegisterMetaType<PortStats>("PortStats");
 
+    // Reserve an available ephemeral port first so the test does not depend on
+    // a hard-coded port being free on the developer's machine.
     QTcpServer portProbe;
     if (!portProbe.listen(QHostAddress::LocalHost, 0)) {
         qCritical() << "Cannot reserve a test port:" << portProbe.errorString();
@@ -76,6 +93,7 @@ int main(int argc, char *argv[])
     const quint16 port = portProbe.serverPort();
     portProbe.close();
 
+    // The worker is moved to a dedicated thread exactly as the GUI does it.
     QThread serverThread;
     auto *worker = new PortServerWorker(QHostAddress::LocalHost, port);
     worker->moveToThread(&serverThread);
@@ -83,6 +101,8 @@ int main(int argc, char *argv[])
     QObject::connect(worker, &PortServerWorker::stopped, &serverThread, &QThread::quit, Qt::DirectConnection);
     QObject::connect(&serverThread, &QThread::finished, worker, &QObject::deleteLater);
 
+    // Wait asynchronously for the worker to publish Listening or Failed. The
+    // timeout keeps a broken startup from hanging the test process forever.
     bool listening = false;
     QString startupError;
     QEventLoop startupLoop;
@@ -112,6 +132,7 @@ int main(int argc, char *argv[])
         if (!passed) {
             qCritical() << "Client connection failed:" << socket.errorString();
         } else {
+            // Verify that a frame split across two TCP writes is reassembled.
             const QByteArray splitFrame = makeFrame(0x01, QByteArray::fromHex("010203040506"));
             const QByteArray firstPart = splitFrame.left(4);
             const QByteArray secondPart = splitFrame.mid(4);
@@ -126,6 +147,7 @@ int main(int argc, char *argv[])
                 passed = false;
             }
 
+            // Verify that two frames and a raw ASCII request are all echoed.
             const QByteArray stickyFrames = makeFrame(0x02) + makeFrame(0x03, QByteArray("payload"));
             passed &= expectEcho(socket, stickyFrames, "sticky frames");
             passed &= expectEcho(socket, QByteArray("ASCII command\r\n"), "raw ASCII");
@@ -134,6 +156,8 @@ int main(int argc, char *argv[])
         }
     }
 
+    // Always stop the worker, including after a failed assertion, so the test
+    // does not leave a QThread running during process shutdown.
     if (serverThread.isRunning()) {
         QMetaObject::invokeMethod(worker, "stop", Qt::BlockingQueuedConnection);
         serverThread.quit();

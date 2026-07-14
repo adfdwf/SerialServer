@@ -22,6 +22,9 @@
 #include <QVBoxLayout>
 
 namespace {
+// Column indexes are kept in one place so table creation and updates use the
+// same layout. Adding a column requires updating both the enum and the header
+// labels in createUi().
 enum Column {
     PortColumn,
     StateColumn,
@@ -37,6 +40,11 @@ enum Column {
     ColumnCount
 };
 
+/**
+ * @brief Creates a centered, non-editable table cell.
+ * @param text Initial cell text.
+ * @return Newly allocated item owned by the table after insertion.
+ */
 QTableWidgetItem *makeItem(const QString &text = {})
 {
     auto *item = new QTableWidgetItem(text);
@@ -45,6 +53,9 @@ QTableWidgetItem *makeItem(const QString &text = {})
 }
 }
 
+/**
+ * @brief Builds the window, controls, table, log, and signal connections.
+ */
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -53,12 +64,18 @@ MainWindow::MainWindow(QWidget *parent)
     populateAddresses();
 }
 
+/**
+ * @brief Stops all worker threads before Qt destroys the window.
+ */
 MainWindow::~MainWindow()
 {
     m_closing = true;
     stopServers(true);
 }
 
+/**
+ * @brief Handles a user/window-manager close request.
+ */
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     m_closing = true;
@@ -66,6 +83,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     event->accept();
 }
 
+/**
+ * @brief Creates the configuration form and the live statistics view.
+ */
 void MainWindow::createUi()
 {
     setWindowTitle(QStringLiteral("SerialServer - Multi-Port TCP Benchmark Server"));
@@ -75,6 +95,8 @@ void MainWindow::createUi()
     auto *rootLayout = new QVBoxLayout(central);
 
     auto *formLayout = new QFormLayout();
+    // The combo is editable because a machine may have an interface that is
+    // not enumerated yet or the user may intentionally enter 0.0.0.0.
     m_addressCombo = new QComboBox(central);
     m_addressCombo->setEditable(true);
     m_portsEdit = new QLineEdit(QStringLiteral("1-65534"), central);
@@ -97,6 +119,7 @@ void MainWindow::createUi()
     rootLayout->addWidget(m_summaryLabel);
 
     auto *splitter = new QSplitter(Qt::Vertical, central);
+    // The table is read-only: all values are snapshots published by workers.
     m_table = new QTableWidget(splitter);
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({QStringLiteral("Port"),
@@ -130,8 +153,13 @@ void MainWindow::createUi()
     QObject::connect(m_stopButton, &QPushButton::clicked, this, QOverload<>::of(&MainWindow::stopServers));
 }
 
+/**
+ * @brief Populates the listen-address selector from local IPv4 interfaces.
+ */
 void MainWindow::populateAddresses()
 {
+    // 0.0.0.0 listens on every local IPv4 interface and is convenient when the
+    // service must accept clients from another machine.
     m_addressCombo->addItem(QStringLiteral("0.0.0.0"));
     m_addressCombo->addItem(QStringLiteral("127.0.0.1"));
 
@@ -149,6 +177,9 @@ void MainWindow::populateAddresses()
     m_addressCombo->setCurrentText(QStringLiteral("0.0.0.0"));
 }
 
+/**
+ * @brief Validates the form and starts one worker per requested port.
+ */
 void MainWindow::startServers()
 {
     if (!m_endpoints.isEmpty()) {
@@ -173,6 +204,8 @@ void MainWindow::startServers()
     setRunningUi(true);
     appendLog(QStringLiteral("Starting %1 ports on %2").arg(parsed.ports.size()).arg(address.toString()));
 
+    // Each port gets an independent thread and QTcpServer. A failure on one
+    // port is therefore visible in that row without stopping other ports.
     for (quint16 port : parsed.ports) {
         const int row = m_table->rowCount();
         m_table->insertRow(row);
@@ -209,11 +242,18 @@ void MainWindow::startServers()
     }
 }
 
+/**
+ * @brief Public slot used by the Stop button.
+ */
 void MainWindow::stopServers()
 {
     stopServers(false);
 }
 
+/**
+ * @brief Requests all workers to stop, optionally waiting during destruction.
+ * @param waitForCompletion True when the window is being destroyed.
+ */
 void MainWindow::stopServers(bool waitForCompletion)
 {
     if (m_endpoints.isEmpty()) {
@@ -228,6 +268,8 @@ void MainWindow::stopServers(bool waitForCompletion)
         appendLog(QStringLiteral("Stopping servers..."));
     }
 
+    // Take a copy because worker-finished callbacks remove entries from the
+    // live hash while shutdown proceeds.
     const QList<Endpoint> endpoints = m_endpoints.values();
     for (const Endpoint &endpoint : endpoints) {
         if (!endpoint.thread || !endpoint.worker || !endpoint.thread->isRunning()) {
@@ -250,6 +292,10 @@ void MainWindow::stopServers(bool waitForCompletion)
     }
 }
 
+/**
+ * @brief Updates one table row and refreshes the aggregate summary.
+ * @param stats Latest snapshot emitted by a PortServerWorker.
+ */
 void MainWindow::updatePortStats(const PortStats &stats)
 {
     const auto endpoint = m_endpoints.constFind(stats.port);
@@ -282,6 +328,9 @@ void MainWindow::updatePortStats(const PortStats &stats)
     updateSummary();
 }
 
+/**
+ * @brief Enables/disables controls according to whether workers are running.
+ */
 void MainWindow::setRunningUi(bool running)
 {
     m_addressCombo->setEnabled(!running);
@@ -290,6 +339,9 @@ void MainWindow::setRunningUi(bool running)
     m_stopButton->setEnabled(running);
 }
 
+/**
+ * @brief Recalculates totals across all configured ports.
+ */
 void MainWindow::updateSummary()
 {
     quint64 active = 0;
@@ -331,22 +383,34 @@ void MainWindow::updateSummary()
             .arg(errors));
 }
 
+/**
+ * @brief Appends a timestamped message to the bounded log widget.
+ */
 void MainWindow::appendLog(const QString &message)
 {
     m_log->appendPlainText(QStringLiteral("[%1] %2")
                                .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss.zzz")), message));
 }
 
+/**
+ * @brief Formats a counter without changing its unit.
+ */
 QString MainWindow::formatCount(quint64 value)
 {
     return QString::number(value);
 }
 
+/**
+ * @brief Converts bytes to mebibytes with three fractional digits.
+ */
 QString MainWindow::formatMiB(quint64 bytes)
 {
     return QString::number(static_cast<double>(bytes) / (1024.0 * 1024.0), 'f', 3);
 }
 
+/**
+ * @brief Converts bytes per second to mebibytes per second for display.
+ */
 QString MainWindow::formatRate(double bytesPerSecond)
 {
     return QString::number(bytesPerSecond / (1024.0 * 1024.0), 'f', 3);

@@ -14,6 +14,12 @@ class QTcpServer;
 class QTcpSocket;
 class QTimer;
 
+/**
+ * @brief Snapshot of one listening port's runtime state and counters.
+ *
+ * The worker owns the live counters. A copy is emitted to the GUI so the GUI
+ * never directly accesses socket-thread state.
+ */
 struct PortStats
 {
     quint16 port = 0;
@@ -32,14 +38,34 @@ struct PortStats
 
 Q_DECLARE_METATYPE(PortStats)
 
+/**
+ * @brief Runs one QTcpServer instance in a dedicated QThread.
+ *
+ * Each worker listens on exactly one address/port pair. It accepts multiple
+ * clients, gives each client its own EchoStreamProcessor, and periodically
+ * publishes a copy of PortStats to the main window.
+ */
 class PortServerWorker final : public QObject
 {
     Q_OBJECT
 public:
+    /**
+     * @brief Creates a worker for one listening endpoint.
+     * @param address Local interface address to bind.
+     * @param port TCP port to listen on.
+     * @param parent Optional Qt object parent.
+     */
     explicit PortServerWorker(QHostAddress address, quint16 port, QObject *parent = nullptr);
 
 public Q_SLOTS:
+    /**
+     * @brief Creates the TCP server and starts its statistics timer.
+     */
     void start();
+
+    /**
+     * @brief Stops accepting clients and closes all active client sockets.
+     */
     void stop();
 
 Q_SIGNALS:
@@ -47,6 +73,8 @@ Q_SIGNALS:
     void stopped(quint16 port);
 
 private:
+    // These methods execute in the worker thread and therefore may access the
+    // worker's QTcpServer, QTcpSocket map, and counters directly.
     void acceptConnections();
     void handleReadyRead(QTcpSocket *socket);
     void removeConnection(QTcpSocket *socket);

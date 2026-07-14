@@ -6,6 +6,12 @@
 
 namespace {
 
+/**
+ * @brief Builds a test frame using the same wire format as the server.
+ * @param command Command byte placed at offset 2.
+ * @param payload Optional payload bytes.
+ * @return Complete frame including the final modulo-256 checksum.
+ */
 QByteArray makeFrame(quint8 command, const QByteArray &payload = {})
 {
     QByteArray frame;
@@ -29,6 +35,9 @@ QByteArray makeFrame(quint8 command, const QByteArray &payload = {})
     return frame;
 }
 
+/**
+ * @brief Records a failed assertion and returns the assertion value.
+ */
 bool check(bool condition, const char *message)
 {
     if (!condition) {
@@ -39,11 +48,16 @@ bool check(bool condition, const char *message)
 
 } // namespace
 
+/**
+ * @brief Runs parser and stream-framing unit checks without a GUI.
+ */
 int main(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
     bool passed = true;
 
+    // Port parsing checks cover ordering, deduplication, invalid boundaries,
+    // reversed ranges, and the configured maximum-port safety limit.
     const PortParseResult ports = PortRangeParser::parse(QStringLiteral("10162, 10160-10162, 10200"));
     passed &= check(ports.isValid(), "valid port list rejected");
     passed &= check(ports.ports == QVector<quint16>({10160, 10161, 10162, 10200}), "ports were not sorted or deduplicated");
@@ -54,27 +68,32 @@ int main(int argc, char *argv[])
     const QByteArray firstFrame = makeFrame(0x01);
     const QByteArray secondFrame = makeFrame(0x02, QByteArray::fromHex("0102030405"));
 
+    // A split frame must not be emitted until its second TCP chunk arrives.
     EchoStreamProcessor splitProcessor;
     passed &= check(splitProcessor.appendData(firstFrame.left(4)).responses.isEmpty(), "partial frame emitted early");
     const auto completed = splitProcessor.appendData(firstFrame.mid(4));
     passed &= check(completed.responses == QVector<QByteArray>({firstFrame}), "split frame not reassembled");
     passed &= check(completed.protocolFrames == 1, "protocol frame counter incorrect");
 
+    // Two frames in one TCP read must be separated into two echo responses.
     EchoStreamProcessor stickyProcessor;
     const auto sticky = stickyProcessor.appendData(firstFrame + secondFrame);
     passed &= check(sticky.responses == QVector<QByteArray>({firstFrame, secondFrame}), "sticky frames not separated");
 
+    // Data without the A0 81 marker is treated as a raw echo block.
     EchoStreamProcessor rawProcessor;
     const QByteArray raw("ASCII command\r\n");
     const auto rawResult = rawProcessor.appendData(raw);
     passed &= check(rawResult.responses == QVector<QByteArray>({raw}), "raw block not echoed");
     passed &= check(rawResult.rawBlocks == 1, "raw block counter incorrect");
 
+    // Raw bytes before a valid frame must be preserved and returned first.
     EchoStreamProcessor mixedProcessor;
     const QByteArray prefix("raw");
     const auto mixed = mixedProcessor.appendData(prefix + secondFrame);
     passed &= check(mixed.responses == QVector<QByteArray>({prefix, secondFrame}), "raw prefix and protocol frame not separated");
 
+    // Checksum errors are counted, but the original frame is still echoed.
     QByteArray invalidChecksum = firstFrame;
     invalidChecksum[invalidChecksum.size() - 1] ^= 0x01;
     EchoStreamProcessor checksumProcessor;

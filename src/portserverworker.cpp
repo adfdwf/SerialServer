@@ -8,10 +8,18 @@
 #include <utility>
 
 namespace {
+// A client that never reads can otherwise make Qt accumulate an unlimited
+// amount of pending echo data. The limit protects the worker and the process.
 constexpr qint64 kMaximumQueuedWriteBytes = 64LL * 1024 * 1024;
+
+// This read-buffer size is large enough for bursty TCP clients while still
+// providing a bounded per-socket memory cost.
 constexpr qint64 kSocketReadBufferBytes = 16LL * 1024 * 1024;
 }
 
+/**
+ * @brief Initializes the endpoint and its initial statistics state.
+ */
 PortServerWorker::PortServerWorker(QHostAddress address, quint16 port, QObject *parent)
     : QObject(parent), m_address(std::move(address)), m_port(port)
 {
@@ -19,6 +27,12 @@ PortServerWorker::PortServerWorker(QHostAddress address, quint16 port, QObject *
     m_stats.state = QStringLiteral("Starting");
 }
 
+/**
+ * @brief Creates the listening socket and starts periodic statistics updates.
+ *
+ * The method is invoked through QThread::started, so all QTcpServer and QTimer
+ * objects are created in the worker thread that owns them.
+ */
 void PortServerWorker::start()
 {
     if (m_started) {
@@ -26,6 +40,8 @@ void PortServerWorker::start()
     }
     m_started = true;
 
+    // One QTcpServer represents one configured port. The pending-connection
+    // queue is deliberately larger than the number of active worker threads.
     m_server = new QTcpServer(this);
     m_server->setMaxPendingConnections(4096);
     QObject::connect(m_server, &QTcpServer::newConnection, this, &PortServerWorker::acceptConnections);
@@ -35,6 +51,8 @@ void PortServerWorker::start()
         publishStats();
     });
 
+    // listen() binds the local interface. This server does not connect to a
+    // remote serial server; clients such as NetAssist connect to this endpoint.
     if (!m_server->listen(m_address, m_port)) {
         m_stats.state = QStringLiteral("Failed");
         m_stats.lastError = m_server->errorString();
@@ -52,6 +70,9 @@ void PortServerWorker::start()
     publishStats();
 }
 
+/**
+ * @brief Stops timers, closes the listening socket, and aborts active clients.
+ */
 void PortServerWorker::stop()
 {
     if (m_stopping) {
@@ -66,6 +87,8 @@ void PortServerWorker::stop()
         m_server->close();
     }
 
+    // Copy the keys before deleting sockets because abort/disconnect signals may
+    // modify the original hash while the shutdown is in progress.
     const QList<QTcpSocket *> sockets = m_processors.keys();
     for (QTcpSocket *socket : sockets) {
         socket->disconnect(this);
@@ -79,6 +102,9 @@ void PortServerWorker::stop()
     emit stopped(m_port);
 }
 
+/**
+ * @brief Accepts all currently pending clients and connects their signals.
+ */
 void PortServerWorker::acceptConnections()
 {
     while (m_server && m_server->hasPendingConnections()) {
@@ -87,6 +113,8 @@ void PortServerWorker::acceptConnections()
             continue;
         }
 
+        // LowDelayOption maps to TCP_NODELAY and avoids adding Nagle delay to
+        // small request/response exchanges used by the benchmark.
         socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
         socket->setReadBufferSize(kSocketReadBufferBytes);
         m_processors.insert(socket, EchoStreamProcessor());
@@ -116,6 +144,13 @@ void PortServerWorker::acceptConnections()
     }
 }
 
+/**
+ * @brief Reads, frames, validates, and echoes data from one client.
+ *
+ * readAll() may contain partial or multiple application frames. The per-socket
+ * EchoStreamProcessor owns that framing state, so clients cannot interfere with
+ * one another's incomplete packets.
+ */
 void PortServerWorker::handleReadyRead(QTcpSocket *socket)
 {
     auto processor = m_processors.find(socket);
@@ -130,6 +165,8 @@ void PortServerWorker::handleReadyRead(QTcpSocket *socket)
     m_stats.receivedRequests += static_cast<quint64>(result.responses.size());
     m_stats.protocolErrors += result.checksumErrors + result.malformedFrames;
 
+    // write() only queues bytes in Qt; bytesToWrite() is checked before each
+    // response to prevent an unresponsive client from exhausting memory.
     for (const QByteArray &response : result.responses) {
         if (socket->bytesToWrite() > kMaximumQueuedWriteBytes) {
             ++m_stats.protocolErrors;
@@ -149,6 +186,9 @@ void PortServerWorker::handleReadyRead(QTcpSocket *socket)
     }
 }
 
+/**
+ * @brief Removes a disconnected client and reports an incomplete tail.
+ */
 void PortServerWorker::removeConnection(QTcpSocket *socket)
 {
     const auto processor = m_processors.find(socket);
@@ -165,6 +205,9 @@ void PortServerWorker::removeConnection(QTcpSocket *socket)
     socket->deleteLater();
 }
 
+/**
+ * @brief Calculates interval rates and emits a copy of the current counters.
+ */
 void PortServerWorker::publishStats()
 {
     if (m_rateTimer.isValid()) {

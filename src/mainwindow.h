@@ -15,19 +15,37 @@ class QPushButton;
 class QTableWidget;
 class QThread;
 
+/**
+ * @brief Main window for configuring and monitoring multiple TCP echo ports.
+ *
+ * The window owns one QThread/PortServerWorker pair per configured port. Socket
+ * work stays outside the GUI thread, while queued stats signals update the table.
+ */
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
 public:
+    /**
+     * @brief Builds the configuration controls and statistics table.
+     */
     explicit MainWindow(QWidget *parent = nullptr);
+
+    /**
+     * @brief Stops all workers before the window is destroyed.
+     */
     ~MainWindow() override;
 
 protected:
     void closeEvent(QCloseEvent *event) override;
 
 private Q_SLOTS:
+    /** @brief Validates input and starts one worker for every selected port. */
     void startServers();
+
+    /** @brief Requests an asynchronous stop for all configured workers. */
     void stopServers();
+
+    /** @brief Applies a worker's latest statistics snapshot to the table. */
     void updatePortStats(const PortStats &stats);
 
 private:

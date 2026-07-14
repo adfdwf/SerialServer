@@ -5,6 +5,13 @@
 
 #include <algorithm>
 
+/**
+ * @brief Parses a comma-separated list of individual ports and ranges.
+ *
+ * The parser validates the complete input before the caller starts any worker.
+ * QSet removes duplicates, while the final sort makes the UI and test output
+ * deterministic regardless of input order.
+ */
 PortParseResult PortRangeParser::parse(const QString &specification, int maximumPortCount)
 {
     PortParseResult result;
@@ -19,6 +26,8 @@ PortParseResult PortRangeParser::parse(const QString &specification, int maximum
         return result;
     }
 
+    // Keep a set while parsing so overlapping ranges such as 10160-10162 and
+    // 10162 do not start the same endpoint twice.
     QSet<quint16> uniquePorts;
     const QStringList groups = trimmed.split(QLatin1Char(','), Qt::KeepEmptyParts);
     for (const QString &rawGroup : groups) {
@@ -28,6 +37,8 @@ PortParseResult PortRangeParser::parse(const QString &specification, int maximum
             return result;
         }
 
+        // Keep empty parts so inputs such as "10160-" and "-10160" are rejected
+        // instead of being interpreted as an implicit boundary.
         const QStringList range = group.split(QLatin1Char('-'), Qt::KeepEmptyParts);
         if (range.size() > 2 || range.contains(QString())) {
             result.error = QStringLiteral("Invalid port item: %1").arg(group);
