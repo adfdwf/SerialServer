@@ -77,8 +77,8 @@ void MainWindow::createUi()
     auto *formLayout = new QFormLayout();
     m_addressCombo = new QComboBox(central);
     m_addressCombo->setEditable(true);
-    m_portsEdit = new QLineEdit(QStringLiteral("10160-10169"), central);
-    m_portsEdit->setPlaceholderText(QStringLiteral("Example: 10160-10169,10200"));
+    m_portsEdit = new QLineEdit(QStringLiteral("1-65534"), central);
+    m_portsEdit->setPlaceholderText(QStringLiteral("Example: 1-65534,10200"));
     formLayout->addRow(QStringLiteral("Listen IP:"), m_addressCombo);
     formLayout->addRow(QStringLiteral("Ports:"), m_portsEdit);
     rootLayout->addLayout(formLayout);
