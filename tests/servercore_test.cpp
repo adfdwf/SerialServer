@@ -6,70 +6,115 @@
 
 namespace {
 
-/** 构造 A0 + 单字节长度 + payload + 校验和协议帧。 */
-QByteArray makeFrame(const QByteArray &payload)
+/**
+ * @brief Builds a test frame using the same wire format as the server.
+ * @param command Command byte placed at offset 2.
+ * @param payload Optional payload bytes.
+ * @return Complete frame including the final modulo-256 checksum.
+ */
+QByteArray makeFrame(quint8 command, const QByteArray &payload = {})
 {
     QByteArray frame;
     frame.append(static_cast<char>(0xA0));
-    frame.append(static_cast<char>(payload.size()));
+    frame.append(static_cast<char>(0x81));
+    frame.append(static_cast<char>(command));
+
+    const quint32 size = static_cast<quint32>(payload.size());
+    frame.append(static_cast<char>((size >> 24) & 0xFF));
+    frame.append(static_cast<char>((size >> 16) & 0xFF));
+    frame.append(static_cast<char>((size >> 8) & 0xFF));
+    frame.append(static_cast<char>(size & 0xFF));
+    frame.append(static_cast<char>(0x00));
     frame.append(payload);
+
     quint8 checksum = 0;
-    for (char byte : frame) checksum = static_cast<quint8>(checksum + static_cast<quint8>(byte));
+    for (char byte : frame) {
+        checksum = static_cast<quint8>(checksum + static_cast<quint8>(byte));
+    }
     frame.append(static_cast<char>(checksum));
     return frame;
 }
 
-/** 记录失败断言并返回断言结果。 */
+/**
+ * @brief Records a failed assertion and returns the assertion value.
+ */
 bool check(bool condition, const char *message)
 {
-    if (!condition) qCritical() << message;
+    if (!condition) {
+        qCritical() << message;
+    }
     return condition;
 }
 
 } // namespace
 
-/** 执行端口列表和新 TCP 协议流解析测试。 */
+/**
+ * @brief Runs parser and stream-framing unit checks without a GUI.
+ */
 int main(int argc, char *argv[])
 {
     QCoreApplication application(argc, argv);
     bool passed = true;
 
+    // Port parsing checks cover ordering, deduplication, invalid boundaries,
+    // reversed ranges, and the configured maximum-port safety limit.
     const PortParseResult ports = PortRangeParser::parse(QStringLiteral("10162, 10160-10162, 10200"));
     passed &= check(ports.isValid(), "valid port list rejected");
     passed &= check(ports.ports == QVector<quint16>({10160, 10161, 10162, 10200}), "ports were not sorted or deduplicated");
+    passed &= check(!PortRangeParser::parse(QStringLiteral("0,10160")).isValid(), "zero port accepted");
+    passed &= check(!PortRangeParser::parse(QStringLiteral("10170-10160")).isValid(), "reversed range accepted");
+    passed &= check(!PortRangeParser::parse(QStringLiteral("1-10"), 5).isValid(), "port limit ignored");
 
-    const QByteArray firstPayload = QByteArray::fromHex("010203");
-    const QByteArray secondPayload = QByteArray("payload");
-    const QByteArray firstFrame = makeFrame(firstPayload);
-    const QByteArray secondFrame = makeFrame(secondPayload);
+    const QByteArray firstFrame = makeFrame(0x01);
+    const QByteArray secondFrame = makeFrame(0x02, QByteArray::fromHex("0102030405"));
+    const QByteArray deviceResponse = EchoStreamProcessor::buildProtocolResponse(firstFrame);
+    passed &= check(deviceResponse == QByteArray::fromHex("A0 00 64 81 01 00 00 10 96"), "device response format or checksum incorrect");
 
+    // A split frame must not be emitted until its second TCP chunk arrives.
     EchoStreamProcessor splitProcessor;
-    passed &= check(splitProcessor.appendData(firstFrame.left(2)).responses.isEmpty(), "partial frame emitted early");
-    const auto completed = splitProcessor.appendData(firstFrame.mid(2));
-    passed &= check(completed.responses.size() == 1 && completed.responses[0].data == firstPayload && completed.responses[0].protocolFrame, "split frame payload incorrect");
+    passed &= check(splitProcessor.appendData(firstFrame.left(4)).responses.isEmpty(), "partial frame emitted early");
+    const auto completed = splitProcessor.appendData(firstFrame.mid(4));
+    passed &= check(completed.responses == QVector<QByteArray>({firstFrame}), "split frame not reassembled");
     passed &= check(completed.protocolFrames == 1, "protocol frame counter incorrect");
 
+    // Two frames in one TCP read must be separated into two echo responses.
     EchoStreamProcessor stickyProcessor;
     const auto sticky = stickyProcessor.appendData(firstFrame + secondFrame);
-    passed &= check(sticky.responses.size() == 2 && sticky.responses[0].data == firstPayload && sticky.responses[1].data == secondPayload, "sticky frames not separated");
+    passed &= check(sticky.responses == QVector<QByteArray>({firstFrame, secondFrame}), "sticky frames not separated");
 
+    // Data without the A0 81 marker is treated as a raw echo block.
     EchoStreamProcessor rawProcessor;
     const QByteArray raw("ASCII command\r\n");
     const auto rawResult = rawProcessor.appendData(raw);
-    passed &= check(rawResult.responses.size() == 1 && rawResult.responses[0].data == raw && !rawResult.responses[0].protocolFrame, "raw block not echoed");
+    passed &= check(rawResult.responses == QVector<QByteArray>({raw}), "raw block not echoed");
+    passed &= check(rawResult.rawBlocks == 1, "raw block counter incorrect");
 
+    // Raw bytes before a valid frame must be preserved and returned first.
     EchoStreamProcessor mixedProcessor;
-    const auto mixed = mixedProcessor.appendData(QByteArray("raw") + firstFrame);
-    passed &= check(mixed.responses.size() == 2 && mixed.responses[0].data == QByteArray("raw") && mixed.responses[1].data == firstPayload, "raw prefix and payload not separated");
+    const QByteArray prefix("raw");
+    const auto mixed = mixedProcessor.appendData(prefix + secondFrame);
+    passed &= check(mixed.responses == QVector<QByteArray>({prefix, secondFrame}), "raw prefix and protocol frame not separated");
 
-    QByteArray invalidFrame = firstFrame;
-    invalidFrame[invalidFrame.size() - 1] ^= 0x01;
-    EchoStreamProcessor invalidProcessor;
-    const auto invalid = invalidProcessor.appendData(invalidFrame + secondFrame);
-    passed &= check(invalid.responses.size() == 1 && invalid.responses[0].data == secondPayload, "invalid frame was not discarded and resynchronized");
-    passed &= check(invalid.checksumErrors == 1, "checksum error not counted");
+    // Checksum errors are counted, but the original frame is still echoed.
+    QByteArray invalidChecksum = firstFrame;
+    invalidChecksum[invalidChecksum.size() - 1] ^= 0x01;
+    EchoStreamProcessor checksumProcessor;
+    const auto checksumResult = checksumProcessor.appendData(invalidChecksum);
+    passed &= check(checksumResult.responses == QVector<QByteArray>({invalidChecksum}), "invalid frame was not echoed unchanged");
+    passed &= check(checksumResult.checksumErrors == 1, "checksum error not counted");
 
-    if (!passed) return 1;
+    const QByteArray largePayload(4 * 1024 * 1024, static_cast<char>(0x5A));
+    const QByteArray largeFrame = makeFrame(0x04, largePayload);
+    EchoStreamProcessor largeProcessor;
+    const auto largeResult = largeProcessor.appendData(largeFrame);
+    passed &= check(largeResult.responses == QVector<QByteArray>({largeFrame}), "4 MiB protocol frame not reassembled");
+    passed &= check(EchoStreamProcessor::buildProtocolResponse(largeFrame) ==
+                        QByteArray::fromHex("A0 00 64 81 04 00 40 10 D9"),
+                    "large protocol request did not produce the device response");
+
+    if (!passed) {
+        return 1;
+    }
     qInfo() << "SerialServer core tests passed";
     return 0;
 }
