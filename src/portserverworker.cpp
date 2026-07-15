@@ -167,7 +167,7 @@ void PortServerWorker::handleReadyRead(QTcpSocket *socket)
 
     // write() only queues bytes in Qt; bytesToWrite() is checked before each
     // response to prevent an unresponsive client from exhausting memory.
-    for (const QByteArray &response : result.responses) {
+    for (const EchoStreamProcessor::Response &response : result.responses) {
         if (socket->bytesToWrite() > kMaximumQueuedWriteBytes) {
             ++m_stats.protocolErrors;
             m_stats.lastError = QStringLiteral("Connection closed because its write queue exceeded 64 MiB");
@@ -175,8 +175,8 @@ void PortServerWorker::handleReadyRead(QTcpSocket *socket)
             return;
         }
 
-        const QByteArray deviceResponse = EchoStreamProcessor::buildProtocolResponse(response);
-        const qint64 queuedBytes = socket->write(deviceResponse);
+        // 协议帧已经在解析器中去掉帧头、长度和校验；原始块保持原样。
+        const qint64 queuedBytes = socket->write(response.data);
         if (queuedBytes < 0) {
             ++m_stats.protocolErrors;
             m_stats.lastError = socket->errorString();

@@ -2,28 +2,20 @@
 
 #include <QtGlobal>
 
-/**
- * @brief Appends TCP bytes and returns every complete protocol unit.
- *
- * The parser deliberately preserves the original bytes. It only determines
- * boundaries and records checksum/format errors; the server layer decides the
- * response representation after framing is complete.
- */
+/** 追加字节并处理半包、粘包、原始块和校验失败。 */
 EchoStreamProcessor::Result EchoStreamProcessor::appendData(const QByteArray &data)
 {
-    Result result;
     m_buffer.append(data);
+    Result result;
 
     while (!m_buffer.isEmpty()) {
-        // Locate the next A0 81 marker. Data before it is not part of a framed
-        // packet and is returned as a raw block instead of being silently lost.
         const int headerIndex = findHeader(m_buffer);
         if (headerIndex < 0) {
-            // Keep a trailing 0xA0 because it may be the first byte of a split protocol header.
-            const bool hasPartialHeader = static_cast<quint8>(m_buffer.back()) == kHeaderByte;
-            const int rawSize = m_buffer.size() - (hasPartialHeader ? 1 : 0);
+            // 没有 A0 的数据是原始 Echo；尾部 A0 可能是拆开的帧头。
+            const bool partialHeader = static_cast<quint8>(m_buffer.back()) == kHeaderByte;
+            const int rawSize = m_buffer.size() - (partialHeader ? 1 : 0);
             if (rawSize > 0) {
-                result.responses.push_back(m_buffer.left(rawSize));
+                result.responses.push_back({m_buffer.left(rawSize), false});
                 ++result.rawBlocks;
                 m_buffer.remove(0, rawSize);
             }
@@ -31,111 +23,74 @@ EchoStreamProcessor::Result EchoStreamProcessor::appendData(const QByteArray &da
         }
 
         if (headerIndex > 0) {
-            result.responses.push_back(m_buffer.left(headerIndex));
+            result.responses.push_back({m_buffer.left(headerIndex), false});
             ++result.rawBlocks;
             m_buffer.remove(0, headerIndex);
             continue;
         }
 
-        if (m_buffer.size() < kMinimumFrameSize) {
+        if (m_buffer.size() < 2) {
             break;
         }
 
-        // A complete minimum frame is available, so reading the four-byte length
-        // field is safe. The upper limit prevents malformed input from creating
-        // an unbounded wait or an unreasonable frame-size calculation.
-        const quint32 payloadSize = payloadLength(m_buffer);
-        if (payloadSize > kMaximumPayloadLength) {
-            result.responses.push_back(m_buffer);
-            ++result.rawBlocks;
-            ++result.malformedFrames;
-            m_buffer.clear();
-            break;
-        }
-
-        // The protocol has an eight-byte header, payload, and one checksum byte.
-        const qint64 frameSize = static_cast<qint64>(kHeaderSize) + payloadSize + 1;
+        const int payloadSize = payloadLength(m_buffer);
+        const int frameSize = payloadSize + kMinimumFrameSize;
         if (m_buffer.size() < frameSize) {
+            // 半包：等待下一次 readyRead 补齐 N+3 个字节。
             break;
         }
 
-        const QByteArray frame = m_buffer.left(static_cast<int>(frameSize));
-        m_buffer.remove(0, static_cast<int>(frameSize));
-        // An invalid checksum is reported but the frame is still echoed. This
-        // lets a client observe exactly what arrived and keeps this component a
-        // diagnostic echo server rather than a filtering gateway.
+        const QByteArray frame = m_buffer.left(frameSize);
+        m_buffer.remove(0, frameSize);
         if (!checksumValid(frame)) {
+            // 丢弃当前帧头并重新搜索，避免错误长度/校验导致永久失步。
             ++result.checksumErrors;
+            continue;
         }
-        result.responses.push_back(frame);
+
+        result.responses.push_back({frame.mid(2, payloadSize), true});
         ++result.protocolFrames;
     }
 
     return result;
 }
 
-QByteArray EchoStreamProcessor::buildProtocolResponse(const QByteArray &request)
-{
-    if (request.size() < 9 || static_cast<quint8>(request.at(0)) != 0xA0 ||
-        static_cast<quint8>(request.at(1)) != 0x81) {
-        return request;
-    }
-
-    QByteArray response;
-    response.append(static_cast<char>(0xA0));
-    response.append(static_cast<char>(0x00));
-    response.append(static_cast<char>(0x64));
-    // Preserve the request command fields 0x81 through the first four bytes;
-    // byte 7 is the device success status 0x10 shown in the reference frame.
-    response.append(request.mid(1, 4));
-    response.append(static_cast<char>(0x10));
-
-    quint8 checksum = 0;
-    for (char byte : response) {
-        checksum = static_cast<quint8>(checksum + static_cast<quint8>(byte));
-    }
-    response.append(static_cast<char>(checksum));
-    return response;
-}
-
+/** 返回当前半包缓存长度。 */
 int EchoStreamProcessor::bufferedByteCount() const
 {
     return m_buffer.size();
 }
 
+/** 清空当前客户端的半包缓存。 */
 void EchoStreamProcessor::clear()
 {
     m_buffer.clear();
 }
 
-int EchoStreamProcessor::findHeader(const QByteArray &data)
+/** 查找从指定位置开始的下一个 A0。 */
+int EchoStreamProcessor::findHeader(const QByteArray &data, int from)
 {
-    // Search only for the two-byte marker. The caller already handles a trailing
-    // A0 so a marker split across two TCP reads is retained in m_buffer.
-    for (int index = 0; index + 1 < data.size(); ++index) {
-        if (static_cast<quint8>(data.at(index)) == kHeaderByte &&
-            static_cast<quint8>(data.at(index + 1)) == kFrameTypeByte) {
+    for (int index = qMax(0, from); index < data.size(); ++index) {
+        if (static_cast<quint8>(data.at(index)) == kHeaderByte) {
             return index;
         }
     }
     return -1;
 }
 
-quint32 EchoStreamProcessor::payloadLength(const QByteArray &data)
+/** 读取帧头后的单字节 payload 长度。 */
+int EchoStreamProcessor::payloadLength(const QByteArray &data)
 {
-    // The length is encoded most-significant byte first, independent of host
-    // endianness. QByteArray::at() is safe because the caller checked the minimum
-    // frame size before invoking this helper.
-    quint32 length = 0;
-    for (int offset = 0; offset < 4; ++offset) {
-        length = (length << 8) | static_cast<quint8>(data.at(kLengthOffset + offset));
-    }
-    return length;
+    return static_cast<quint8>(data.at(1));
 }
 
+/** 验证帧头、长度和 payload 的低八位累加和。 */
 bool EchoStreamProcessor::checksumValid(const QByteArray &frame)
 {
-    // The checksum is the modulo-256 sum of every byte before the final byte.
+    if (frame.size() < kMinimumFrameSize) {
+        return false;
+    }
+
     quint8 checksum = 0;
     for (int index = 0; index + 1 < frame.size(); ++index) {
         checksum = static_cast<quint8>(checksum + static_cast<quint8>(frame.at(index)));

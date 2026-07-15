@@ -14,18 +14,11 @@ namespace {
 /**
  * @brief Builds a valid protocol frame for the integration test client.
  */
-QByteArray makeFrame(quint8 command, const QByteArray &payload = {})
+QByteArray makeFrame(const QByteArray &payload)
 {
     QByteArray frame;
     frame.append(static_cast<char>(0xA0));
-    frame.append(static_cast<char>(0x81));
-    frame.append(static_cast<char>(command));
-    const quint32 size = static_cast<quint32>(payload.size());
-    frame.append(static_cast<char>((size >> 24) & 0xFF));
-    frame.append(static_cast<char>((size >> 16) & 0xFF));
-    frame.append(static_cast<char>((size >> 8) & 0xFF));
-    frame.append(static_cast<char>(size & 0xFF));
-    frame.append(static_cast<char>(0x00));
+    frame.append(static_cast<char>(payload.size()));
     frame.append(payload);
 
     quint8 checksum = 0;
@@ -136,7 +129,8 @@ int main(int argc, char *argv[])
             qCritical() << "Client connection failed:" << socket.errorString();
         } else {
             // Verify that a frame split across two TCP writes is reassembled.
-            const QByteArray splitFrame = makeFrame(0x01);
+            const QByteArray splitPayload = QByteArray::fromHex("010203");
+            const QByteArray splitFrame = makeFrame(splitPayload);
             const QByteArray firstPart = splitFrame.left(4);
             const QByteArray secondPart = splitFrame.mid(4);
             passed &= socket.write(firstPart) == firstPart.size();
@@ -144,21 +138,19 @@ int main(int argc, char *argv[])
             passed &= !socket.waitForReadyRead(100);
             passed &= socket.write(secondPart) == secondPart.size();
             passed &= socket.waitForBytesWritten(3000);
-            const QByteArray splitExpected = EchoStreamProcessor::buildProtocolResponse(splitFrame);
-            const QByteArray splitResponse = readExactly(socket, splitExpected.size(), 3000);
-            if (splitResponse != splitExpected) {
-                qCritical() << "split frame expected" << splitExpected.toHex() << "got" << splitResponse.toHex();
+            const QByteArray splitResponse = readExactly(socket, splitPayload.size(), 3000);
+            if (splitResponse != splitPayload) {
+                qCritical() << "split frame expected" << splitPayload.toHex() << "got" << splitResponse.toHex();
                 passed = false;
             }
 
             // Verify that two protocol frames are transformed independently and
             // raw ASCII remains an unchanged response block.
-            const QByteArray firstSticky = makeFrame(0x02);
-            const QByteArray secondSticky = makeFrame(0x03, QByteArray("payload"));
+            const QByteArray firstSticky = makeFrame(QByteArray("first"));
+            const QByteArray secondSticky = makeFrame(QByteArray("payload"));
             passed &= expectProtocolResponse(socket,
                                              firstSticky + secondSticky,
-                                             EchoStreamProcessor::buildProtocolResponse(firstSticky) +
-                                                 EchoStreamProcessor::buildProtocolResponse(secondSticky),
+                                             QByteArray("firstpayload"),
                                              "sticky frames");
             const QByteArray raw = QByteArray("ASCII command\r\n");
             passed &= expectProtocolResponse(socket, raw, raw, "raw ASCII");
